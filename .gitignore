@@ -1,0 +1,12 @@
+# 聊天数据、密钥和导出结果一律不进仓库
+*.db
+*.db-shm
+*.db-wal
+*.key
+*.txt
+*.json
+*.html
+qq_out/
+out/
+__pycache__/
+*.pyc
