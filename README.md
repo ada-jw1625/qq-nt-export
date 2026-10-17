@@ -100,7 +100,7 @@ qq_out/
 
 **`database disk image is malformed`**
 - QQ 被强行结束，WAL 没合并：重新打开 QQ，再正常退出，然后重新解密
-- 数据库真的有坏页：`qq_export.py` 不排序扫描，会自动跳过坏索引；也可以试试 SQLite 的 `.recover`
+- 数据库真的有坏页：`qq_export.py` 按 rowid 分批读表，遇到坏页时只跳过坏掉的那一小段，其余部分照常读完，并在结束时打印被跳过的 rowid 区间
 - 解密参数不对：QQ 9.9.x 的参数是 KDF=SHA-512 4000 轮、HMAC=SHA-1、reserve=48、page_size=4096
 
 **被动扫描超时**：QQ 9.9.31 以后直接用 active 模式。

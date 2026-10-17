@@ -11,8 +11,9 @@
     2024-01-01 12:00:00 '发送者'
     消息内容
 
-注意: QQ 会给消息表建索引，损坏的库用 ORDER BY 会报 malformed，
-因此这里一律"不排序扫描 + Python 内排序"，天然容忍坏索引。
+注意: 库里常有坏页，普通全表扫描撞到坏页就会报 malformed 并中断。
+这里按 rowid 分批读表本身的 B 树（不走索引），撞到坏页时只跳过坏掉的
+那一小段 rowid 区间，其余部分照常读完；排序在 Python 里做。
 """
 import argparse
 import os
@@ -36,22 +37,68 @@ COL_GCODE = "40021"    # 群号
 COL_SNAME = "40090"    # 发送者昵称
 
 
-def scan_table(con, table, batch=5000):
-    """不排序流式扫描一个消息表，避开损坏索引；逐批 yield 行。"""
-    cur = con.cursor()
-    cur.arraysize = batch
+ROWID_MAX = (1 << 63) - 1
+
+
+def _read_after(con, table, cols, after, n):
+    return con.execute(f"SELECT rowid,{cols} FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                       (after, n)).fetchall()
+
+
+def _readable(con, table, pos):
+    try:
+        _read_after(con, table, "1", pos, 1)
+        return True
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _skip_bad(con, table, after):
+    """after 之后紧跟坏页：先指数试探、再二分，返回最近一个可读的起点（找不到返回 None）。"""
+    gap = 1
+    while after + gap < ROWID_MAX and not _readable(con, table, after + gap):
+        gap *= 2
+    if after + gap >= ROWID_MAX:
+        return None
+    lo, hi = gap // 2, gap
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if _readable(con, table, after + mid):
+            hi = mid
+        else:
+            lo = mid
+    return after + hi
+
+
+def scan_table(con, table, batch=5000, skipped=None):
+    """按 rowid 分批流式扫描一个消息表，撞到坏页只跳过坏区间；逐行 yield。
+
+    skipped: 可选 list，记录被跳过的 (起, 止) rowid 区间。
+    """
     cols = f'"{COL_TIME}","{COL_SUIN}","{COL_BODY}","{COL_PEER}","{COL_GCODE}","{COL_SNAME}"'
-    cur.execute(f"SELECT {cols} FROM {table}")
+    after = -ROWID_MAX - 1
+    n = batch
     while True:
         try:
-            rows = cur.fetchmany(batch)
+            rows = _read_after(con, table, cols, after, n)
         except sqlite3.DatabaseError:
-            # 撞到坏页 —— 跳过这一批，继续
-            break
+            if n > 1:
+                # 批里某处有坏页 —— 缩小批量逼近它
+                n //= 2
+                continue
+            nxt = _skip_bad(con, table, after)
+            if skipped is not None:
+                skipped.append((after, nxt if nxt is not None else ROWID_MAX))
+            if nxt is None:
+                return
+            after, n = nxt, batch
+            continue
         if not rows:
-            break
+            return
         for r in rows:
-            yield r
+            yield r[1:]
+        after = rows[-1][0]
+        n = min(batch, n * 2)
 
 
 def as_int(v):
@@ -82,7 +129,8 @@ def export(db_path, out_dir, me=None, groups="me"):
 
     for table, is_group in plans:
         kind = "group" if is_group else "c2c"
-        for t, suin, body, peer, gcode, sname in scan_table(con, table):
+        skipped = []
+        for t, suin, body, peer, gcode, sname in scan_table(con, table, skipped=skipped):
             ts = as_int(t)
             if ts < 10 ** 8:
                 continue
@@ -108,6 +156,10 @@ def export(db_path, out_dir, me=None, groups="me"):
             stats[kind] += 1
             if is_me:
                 stats["me"] += 1
+        if skipped:
+            print(f"{table}: 跳过 {len(skipped)} 段坏页 rowid 区间，其余已读完")
+            for a, b in skipped:
+                print(f"    ({a}, {b}]")
     con.close()
 
     # 写每个会话的 txt（按时间排序）+ 汇总"我"的消息
