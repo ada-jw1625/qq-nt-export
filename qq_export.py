@@ -31,7 +31,7 @@ except Exception:
 COL_TIME = "40050"     # unix 秒
 COL_SUIN = "40033"     # 发送者 QQ 号
 COL_BODY = "40800"     # protobuf blob 正文
-COL_PEER = "40002"     # c2c 对端 QQ 号
+COL_PEER = "40030"     # c2c 对端 QQ 号（40002 是消息序号，不是 QQ 号）
 COL_GCODE = "40021"    # 群号
 COL_SNAME = "40090"    # 发送者昵称
 
