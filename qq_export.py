@@ -108,8 +108,11 @@ def as_int(v):
         return 0
 
 
-def export(db_path, out_dir, me=None, groups="me"):
+def export(db_path, out_dir, me=None, groups="me", only_c2c=None, only_group=None):
+    """only_c2c / only_group: 只导出这些好友 QQ 号 / 群号（集合）。
+    两者都为 None 时导出全部；只给了其中一个时，另一类会话不导出。"""
     os.makedirs(out_dir, exist_ok=True)
+    selective = only_c2c is not None or only_group is not None
     con = sqlite3.connect(db_path)
     con.text_factory = bytes
     me_i = int(me) if me else None
@@ -122,15 +125,19 @@ def export(db_path, out_dir, me=None, groups="me"):
     stats = {"c2c": 0, "group": 0, "me": 0}
 
     plans = []
-    if "c2c_msg_table" in tables:
+    if "c2c_msg_table" in tables and (not selective or only_c2c):
         plans.append(("c2c_msg_table", False))
-    if "group_msg_table" in tables:
+    if "group_msg_table" in tables and (not selective or only_group):
         plans.append(("group_msg_table", True))
 
     for table, is_group in plans:
         kind = "group" if is_group else "c2c"
+        wanted = only_group if is_group else only_c2c
         skipped = []
         for t, suin, body, peer, gcode, sname in scan_table(con, table, skipped=skipped):
+            # 指定了会话时，先按会话号过滤，跳过其余会话的正文解析
+            if wanted and as_int(gcode if is_group else peer) not in wanted:
+                continue
             ts = as_int(t)
             if ts < 10 ** 8:
                 continue
@@ -194,8 +201,14 @@ def main():
     ap.add_argument("--me", help="你的 QQ 号（把你自己标记为'我'并单独汇总）")
     ap.add_argument("--groups", choices=["me", "all"], default="me",
                     help="群聊导出范围: me=只导你自己发的(快, 默认); all=全部(慢, 需解析千万条)")
+    ap.add_argument("--c2c", help="只导出这些好友的私聊，逗号分隔的 QQ 号")
+    ap.add_argument("--group", help="只导出这些群，逗号分隔的群号")
     args = ap.parse_args()
-    export(args.db, args.out, args.me, args.groups)
+
+    def id_set(s):
+        return {int(x) for x in s.split(",") if x.strip()} if s else None
+
+    export(args.db, args.out, args.me, args.groups, id_set(args.c2c), id_set(args.group))
 
 
 if __name__ == "__main__":
